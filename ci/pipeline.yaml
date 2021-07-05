@@ -1,0 +1,114 @@
+apiVersion: tekton.dev/v1beta1
+kind: Pipeline
+metadata:
+  name: greeter-pipeline
+  labels:
+    app: greeter
+spec:
+  params: 
+    - name: git-url
+      type: string
+    # - name: git-rev
+    #   type: string
+    #   default: ""
+    # - name: git-refspec
+    #   type: string
+    #   default: ""
+  workspaces:
+    - name: source
+    - name: settings
+  tasks:
+    - name: fetch
+      taskRef:
+        name: git-clone
+        kind: ClusterTask
+      params: 
+        - name: url
+          value: $(params.git-url)
+        # - name: revision
+        #   value: $(params.git-rev)
+        # - name: refspec
+        #   value: $(params.git-refspec)
+      workspaces:
+        - name: output
+          workspace: source
+    - name: apply-manifests
+      taskRef: 
+        name: client-with-workspace
+      params:
+        - name: ARGS
+          value: 
+           - apply -f /workspace/source/cluster/greeter/manifests/k8s
+      workspaces:
+        - name: source
+          workspace: source
+      runAfter:
+        - fetch
+    - name: fetch-image-repo
+      taskRef:
+        name: openshift-client
+        kind: ClusterTask
+      params:
+        name: ARGS
+        value:
+          - get ImageStream -l 
+    # - name: fetch-image-repo
+    #   taskRef:
+    #     name: jq
+    #   params:
+    #     - name: "JSON"
+    #       value: "$(tasks.apply-manifests.resources)"
+    #     - name: "FILTER"
+    #       value: .items[] | select(.kind == "ImageStream") | .status.dockerImageRepository
+    #   runAfter:
+    #     - apply-manifests
+    # - name: fetch-deployment-name
+    #   taskRef:
+    #     name: jq
+    #   params:
+    #     - name: "JSON"
+    #       value: "$(tasks.apply-manifests.resources)"
+    #     - name: "FILTER"
+    #       value: .items[] | select(.kind == "Deployment") | "Deployment/" + .metadata.name
+    #   runAfter:
+    #     - apply-manifests
+    - name: compile
+      taskRef:
+        name: maven
+        kind: ClusterTask
+      params:
+        - name: CONTEXT_DIR
+          value: java/greeter
+      workspaces:
+        - name: source
+          workspace: source
+        - name: maven-settings
+          workspace: settings
+      runAfter:
+        - fetch
+    - name: build
+      taskRef:
+        name: buildah
+        kind: ClusterTask
+      params:
+        - name: CONTEXT
+          value: java/greeter
+        - name: IMAGE
+          value: image-registry.openshift-image-registry.svc:5000/openliberty-test/greeter
+      workspaces:
+        - name: source
+          workspace: source
+      runAfter:
+        - compile
+    - name: patch-deploy
+      taskRef: 
+        name: openshift-client
+        kind: ClusterTask
+      runAfter:
+        - fetch-image-repo
+        - build
+        - fetch-deployment-name
+      params:
+        - name: ARGS 
+          value: 
+            - patch $(tasks.fetch-deployment-name.jq-output) --type=merge -p='{"spec":{"template":{"spec":{"containers":[{"name":"greeter","image":"$(tasks.fetch-image-repo.jq-output)@$(tasks.build.IMAGE_DIGEST)"}]}'    
